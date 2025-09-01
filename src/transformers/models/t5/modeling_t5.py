@@ -1040,7 +1040,9 @@ class T5Stack(T5PreTrainedModel):
                 output_attentions,
             )
         elif attention_mask is not None:
-            causal_mask = attention_mask[:, None, None, :]
+            causal_mask = attention_mask
+            if attention_mask.size() == 2:
+                causal_mask = causal_mask[:, None, None, :]
             causal_mask = causal_mask.to(dtype=inputs_embeds.dtype)
             causal_mask = (1.0 - causal_mask) * torch.finfo(inputs_embeds.dtype).min
         else:
