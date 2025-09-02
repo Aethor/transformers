@@ -1869,3 +1869,38 @@ class TestAsymmetricT5(unittest.TestCase):
         # num_hidden_layers is passed to T5Config as num_layers
         model = self.build_model_and_check_forward_pass(num_hidden_layers=2)
         assert len(model.decoder.block) == len(model.encoder.block) == 2
+
+
+@require_torch
+class T5Model4DMaskTests(unittest.TestCase):
+    def tearDown(self):
+        # See LlamaIntegrationTest.tearDown(). Can be removed once LlamaIntegrationTest.tearDown() is removed.
+        cleanup(torch_device, gc_collect=False)
+
+    def setUp(self) -> None:
+        self.model = T5ForConditionalGeneration.from_pretrained("google-t5/t5-small").to(torch_device)
+        self.tokenizer = T5Tokenizer.from_pretrained("google-t5/t5-small")
+
+    @slow
+    def test_trivial_4dmask_same_output(self):
+        input_ids = self.tokenizer("Where is", return_tensors="pt").input_ids
+        decoder_input_ids = self.tokenizer("<pad>", return_tensors="pt").input_ids
+
+        batch_size, sequence_length = input_ids.shape
+        target_length = decoder_input_ids.shape[1]
+        num_heads = self.model.config.num_heads
+
+        attention_mask = torch.ones(batch_size, num_heads, sequence_length, sequence_length)
+        decoder_attention_mask = torch.ones(batch_size, num_heads, target_length, target_length).tril(0)
+        cross_attention_mask = torch.ones(batch_size, num_heads, target_length, sequence_length)
+
+        output_mask = self.model(
+            input_ids.to(torch_device),
+            decoder_input_ids=decoder_input_ids.to(torch_device),
+            attention_mask=attention_mask.to(torch_device),
+            decoder_attention_mask=decoder_attention_mask.to(torch_device),
+            cross_attention_mask=cross_attention_mask.to(torch_device),
+        )
+        output_no_mask = self.model(input_ids=input_ids, decoder_input_ids=decoder_input_ids)
+
+        torch.testing.assert_close(output_no_mask.logits, output_mask.logits)
