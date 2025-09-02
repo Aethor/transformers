@@ -674,7 +674,7 @@ class T5Block(GradientCheckpointingLayer):
         attention_mask=None,
         position_bias=None,
         encoder_hidden_states=None,
-        encoder_attention_mask=None,
+        cross_attention_mask=None,
         encoder_decoder_position_bias=None,
         layer_head_mask=None,
         cross_attn_layer_head_mask=None,
@@ -711,7 +711,7 @@ class T5Block(GradientCheckpointingLayer):
             cross_attention_outputs = self.layer[1](
                 hidden_states,
                 key_value_states=encoder_hidden_states,
-                attention_mask=encoder_attention_mask,
+                attention_mask=cross_attention_mask,
                 position_bias=encoder_decoder_position_bias,
                 layer_head_mask=cross_attn_layer_head_mask,
                 past_key_values=past_key_values,
@@ -953,6 +953,7 @@ class T5Stack(T5PreTrainedModel):
         self,
         input_ids=None,
         attention_mask=None,
+        cross_attention_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         inputs_embeds=None,
@@ -1033,6 +1034,11 @@ class T5Stack(T5PreTrainedModel):
             attention_mask = torch.ones(batch_size, mask_seq_length, device=inputs_embeds.device)
 
         if self.config.is_decoder:
+            # _update_causal_mask expects an already inverted mask in
+            # the case of a 4D decoder mask
+            if not attention_mask is None and attention_mask.dim() == 4:
+                attention_mask = attention_mask.to(dtype=inputs_embeds.dtype)
+                attention_mask = (1.0 - attention_mask) * torch.finfo(inputs_embeds.dtype).min
             causal_mask = self._update_causal_mask(
                 attention_mask,
                 inputs_embeds,
@@ -1051,18 +1057,24 @@ class T5Stack(T5PreTrainedModel):
         else:
             causal_mask = None
 
-        # If a 2D or 3D attention mask is provided for the cross-attention
-        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
+        # If a custom 4D attention mask is provided for the
+        # cross-attention, use it. Otherwise, use the 2D encoder mask
+        # by default.
         if self.is_decoder and encoder_hidden_states is not None:
             encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(
-                    encoder_hidden_shape, device=inputs_embeds.device, dtype=torch.long
-                )
-            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
+            # by default, the cross attention mask is the same as
+            # the encoder mask
+            if cross_attention_mask is None:
+                if not encoder_attention_mask is None:
+                    cross_attention_mask = encoder_attention_mask
+                else:
+                    cross_attention_mask = torch.ones(
+                        encoder_hidden_shape, device=inputs_embeds.device, dtype=torch.long
+                    )
+            extended_cross_attention_mask = self.invert_attention_mask(cross_attention_mask)
         else:
-            encoder_extended_attention_mask = None
+            extended_cross_attention_mask = None
 
         # Prepare head mask if needed
         head_mask = self.get_head_mask(head_mask, self.config.num_layers)
@@ -1104,7 +1116,7 @@ class T5Stack(T5PreTrainedModel):
                 causal_mask,
                 position_bias,
                 encoder_hidden_states,
-                encoder_extended_attention_mask,
+                extended_cross_attention_mask,
                 encoder_decoder_position_bias,  # as a positional argument for gradient checkpointing
                 layer_head_mask=layer_head_mask,
                 cross_attn_layer_head_mask=cross_attn_layer_head_mask,
@@ -1633,6 +1645,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.FloatTensor] = None,
         decoder_input_ids: Optional[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.BoolTensor] = None,
+        cross_attention_mask: Optional[torch.BoolTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         decoder_head_mask: Optional[torch.FloatTensor] = None,
         cross_attn_head_mask: Optional[torch.Tensor] = None,
@@ -1658,6 +1671,10 @@ class T5ForConditionalGeneration(T5PreTrainedModel, GenerationMixin):
             [What are input IDs?](../glossary#input-ids)
 
             To know more on how to prepare `input_ids` for pretraining take a look a [T5 Training](./t5#training).
+        attention_mask (`torch.FloatTensor` of shape `(batch_size, target_sequence_length)`
+                        or `(batch_size, num_heads, sequence_length, sequence_length)`, *optional*):
+            Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will also
+            be used by default.
         decoder_input_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
             Indices of decoder input sequence tokens in the vocabulary.
 
@@ -1671,9 +1688,12 @@ class T5ForConditionalGeneration(T5PreTrainedModel, GenerationMixin):
 
             To know more on how to prepare `decoder_input_ids` for pretraining take a look at [T5
             Training](./t5#training).
-        decoder_attention_mask (`torch.BoolTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
+        decoder_attention_mask (`torch.BoolTensor` of shape `(batch_size, target_sequence_length)`
+                                or `(batch_size, num_heads, target_sequence_length, target_sequence_length)`, *optional*):
             Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will also
             be used by default.
+        cross_attention_mask (`torch.BoolTensor` of shape `(batch_size, num_heads, target_sequence_length, sequence_length)`, *optional*):
+            Default behavior: use `attention_mask` by default.
         decoder_head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
             Mask to nullify selected heads of the self-attention modules in the decoder. Mask values selected in `[0,
             1]`:
@@ -1766,6 +1786,7 @@ class T5ForConditionalGeneration(T5PreTrainedModel, GenerationMixin):
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
+            cross_attention_mask=cross_attention_mask,
             inputs_embeds=decoder_inputs_embeds,
             past_key_values=past_key_values,
             encoder_hidden_states=hidden_states,
