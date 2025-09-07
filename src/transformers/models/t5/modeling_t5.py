@@ -1034,11 +1034,6 @@ class T5Stack(T5PreTrainedModel):
             attention_mask = torch.ones(batch_size, mask_seq_length, device=inputs_embeds.device)
 
         if self.config.is_decoder:
-            # _update_causal_mask expects an already inverted mask in
-            # the case of a 4D decoder mask
-            if not attention_mask is None and attention_mask.dim() == 4:
-                attention_mask = attention_mask.to(dtype=inputs_embeds.dtype)
-                attention_mask = (1.0 - attention_mask) * torch.finfo(inputs_embeds.dtype).min
             causal_mask = self._update_causal_mask(
                 attention_mask,
                 inputs_embeds,
@@ -1275,8 +1270,8 @@ class T5Stack(T5PreTrainedModel):
                 Batch size.
         """
         if attention_mask is not None and attention_mask.dim() == 4:
-            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
-            causal_mask = attention_mask
+            causal_mask = attention_mask.to(dtype=dtype)
+            causal_mask = (1.0 - attention_mask) * torch.finfo(dtype).min
         else:
             min_dtype = torch.finfo(dtype).min
             causal_mask = torch.full(
