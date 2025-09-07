@@ -1872,16 +1872,12 @@ class TestAsymmetricT5(unittest.TestCase):
 
 
 @require_torch
+@slow
 class T5Model4DMaskTests(unittest.TestCase):
-    def tearDown(self):
-        # See LlamaIntegrationTest.tearDown(). Can be removed once LlamaIntegrationTest.tearDown() is removed.
-        cleanup(torch_device, gc_collect=False)
-
     def setUp(self) -> None:
         self.model = T5ForConditionalGeneration.from_pretrained("google-t5/t5-small").to(torch_device)
         self.tokenizer = T5Tokenizer.from_pretrained("google-t5/t5-small")
 
-    @slow
     def test_trivial_4dmask_same_output(self):
         input_ids = self.tokenizer("Where is", return_tensors="pt").input_ids
         decoder_input_ids = self.tokenizer("<pad>", return_tensors="pt").input_ids
